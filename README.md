@@ -58,9 +58,11 @@ raises `TypeError`.
 | `"4.7" <= version < "4.8"` | v4.7 | Opus 4.7 |
 | `version >= "4.8"` | v4.8 | Opus 4.8, Sonnet 5, and Fable 5 |
 
-v4.8+ uses the v4.7 vocabulary with a six-token frame. Opus 5 alone makes trailing ASCII
-whitespace free, which ctok intentionally does not model. Opus 5.5 counts two tokens more than
-Opus 5. This offset is not yet modeled in ctok.
+v4.8+ uses the v4.7 vocabulary with a six-token frame. Opus 5 and the 5.5 generation (Opus 5.5,
+Sonnet 5.5, Haiku 5.5, and Fable 5.1) make trailing ASCII whitespace free, which ctok
+intentionally does not model. With thinking on, which is their default, the 5.5 generation counts
+two tokens more than Opus 5; with thinking off (`disabled`, or `between_tools` on Sonnet 5.5) it
+counts the same. This offset is not yet modeled in ctok.
 
 ## How it works
 
@@ -73,6 +75,13 @@ For one user message, `ctok`:
 3. finds a minimum-cost tiling over the measured vocabulary and UTF-8 byte fallback;
 4. adds the measured message frame.
 
+Two hard-coded strings are handled before the tiling, both matched case-insensitively on ASCII:
+
+- Claude's tool-call namespace `antml:` costs nothing in any family when it follows `<`, `</`, or
+  `<//`, unless `<`, `>`, or the end of the text comes next. `<//` then reads as `</`.
+- In v3 and v4.7, `Human:` or `Assistant:` right after two or more newlines costs two tokens,
+  however it is cased. v4.8+ prices it as ordinary text.
+
 `token_count(text)` is `len(tokenize(text))`. The output notation makes internal structure visible:
 
 | notation | meaning |
@@ -81,6 +90,7 @@ For one user message, `ctok`:
 | `⟨shift⟩`, `⟨caps⟩` | case rewrites |
 | `⟨0xNN⟩` | a byte-fallback token |
 | `⟨pad⟩` | part of the single-message frame |
+| `⟨human⟩`, `⟨assistant⟩` | a legacy turn-marker word (v3 and v4.7) |
 
 ## Measured accuracy
 

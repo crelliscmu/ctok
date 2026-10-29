@@ -398,9 +398,77 @@ SYMBOL_ROWS = [
 ]
 
 
+# A mixed run opening on a border digit (`⅔` with a selector, `①` with a Lao digit) takes ⟨bow⟩
+# behind a space run, as a uniform digit run does. Each family under-counted these by one, and v4.8
+# also at the message head; the single-space rows are the seam controls.
+MIXED_DIGIT_ROWS = [
+    ("3.0", "a  ⅔︀ .", 10), ("3.0", "a ⅔︀ .", 9), ("3.0", "a  ①໒ .", 8), ("3.0", "a १︀ .", 6),
+    ("4.7", "a  ⅔︀ .", 10), ("4.7", "a ⅔︀ .", 9), ("4.7", "a  ①໒ .", 8), ("4.7", "a  ²️ .", 7),
+    ("4.8", " ⅔︀ .", 9), ("4.8", "⅔︀ .", 7), ("4.8", " ①໒ .", 7), ("4.8", "a  ⅔︀ .", 10),
+    # ...and ⟨eow⟩ when it closes on one, which shows before a run that writes no ⟨bow⟩ (an ideograph).
+    ("3.0", "௰໒ 中 .", 10), ("3.0", "⅔６ 鋼 .", 12),
+    ("4.7", "௰໒ 中 .", 10), ("4.7", "⅔６ 鋼 .", 12), ("4.8", "௰໒ 中 .", 9),
+]
+
+# The ideographic tone marks (U+302A to U+302F) take no border markers, as the rest of their block.
+TONE_MARK_ROWS = [
+    ("3.0", "〬 䦜 .", 9), ("3.0", "a  〬 .", 6),
+    ("4.7", "〬 䦜 .", 9), ("4.7", "a  〬 .", 6),
+    ("4.8", "〬 䦜 .", 8), ("4.8", " 〮 .", 5), ("4.8", "a  〬 .", 6),
+]
+
+
+# ẞ is transparent to the title-case test, as İ is: `Aẞ` takes ⟨shift⟩ and keeps ẞ literal. ẞ at
+# the head still blocks, and a second capital still leaves the span literal.
+SHARP_S_ROWS = [
+    ("3.0", "Aẞ", 5), ("3.0", "Ỳẞ", 7), ("3.0", "ẞa", 4), ("3.0", "AẞA", 4),
+    ("4.7", "Aẞ", 5), ("4.7", "Ỳẞ", 7), ("4.7", "ẞa", 4), ("4.7", "AẞA", 4),
+    ("4.8", "Aẞ", 5), ("4.8", "Yẞa", 5),
+]
+
+
+# Claude's tool-call namespace costs nothing after `<`, `</` or `<//` (which reads as `</`) unless
+# `<`, `>` or the end follows. Every family; the v4.8 rows were measured on Opus 4.8 and Haiku 5.5.
+NS = "ant" + "ml:"
+NAMESPACE_ROWS = [
+    ("3.0", f"<{NS}invoke>", 3), ("4.7", f"<{NS}invoke>", 5), ("4.8", f"<{NS}invoke>", 5),
+    ("3.0", f"</{NS}invoke>", 3), ("4.7", f"</{NS}invoke>", 5), ("4.8", f"</{NS}invoke>", 5),
+    ("3.0", f"x <{NS} y", 3), ("4.7", f"x <{NS} y", 3), ("4.8", f"x <{NS} y", 3),
+    ("3.0", f"x </{NS} y", 4), ("4.7", f"x </{NS} y", 4), ("4.8", f"x </{NS} y", 4),
+    ("3.0", f"x <{NS}/", 2), ("4.7", f"x <{NS}/", 2), ("4.8", f"x <{NS}/", 2),
+    ("3.0", f"x <//{NS}y", 3), ("4.7", f"x <//{NS}y", 3), ("4.8", f"x <//{NS}y", 3),
+    ("4.7", f"x <{NS.upper()}y", 3), ("4.8", f"x <{NS.upper()}y", 3),
+    # Not the namespace: `>` or the end follows, or a third slash.
+    ("3.0", f"x <{NS}>", 6), ("4.7", f"x <{NS}>", 6), ("4.8", f"x <{NS}>", 6),
+    ("4.7", f"x <{NS}", 5), ("4.8", f"x <{NS}", 5),
+    ("3.0", f"x <///{NS}y", 7), ("4.7", f"x <///{NS}y", 7), ("4.8", f"x <///{NS}y", 7),
+]
+
+# `Human:` or `Assistant:` after two or more newlines is two tokens in any casing, in v3 and v4.7
+# only. One colon belongs to it; one newline, or another word, is ordinary text.
+TURN_MARKER_ROWS = [
+    ("3.0", "x\n\nHuman: y", 5), ("4.7", "x\n\nHuman: y", 5), ("4.8", "x\n\nHuman: y", 6),
+    ("3.0", "x\n\nASSISTANT: y", 5), ("4.7", "x\n\nASSISTANT: y", 5),
+    ("4.8", "x\n\nASSISTANT: y", 11),
+    ("3.0", "x\n\n\nassistant:y", 5), ("4.7", "x\n\n\nassistant:y", 5),
+    ("4.7", "x\n\nHuman:: y", 6), ("4.7", "x\nHuman: y", 6), ("4.7", "x\n\nUser: y", 5),
+]
+
+# Unicode 16.0 case pairs this Python does not know, as cased letters in every family: Ꟍ/ꟍ, Ꟛ/ꟛ
+# and Ƛ/ƛ. The `'s` rows are the contraction seam, which a letter read as Cn blocked.
+UNICODE_16_ROWS = [
+    ("3.0", "x \ua7cc .", 8), ("4.7", "x \ua7cc .", 8), ("4.8", "x \ua7cc .", 8),
+    ("3.0", "1\ua7cc2", 9), ("4.7", "1\ua7cc2", 9), ("4.8", "1\ua7cc2", 8),
+    ("4.7", "ab\ua7da", 5), ("4.7", "\ua7dc\ua7db", 8),
+    ("3.0", "x \ua7cd's", 7), ("4.7", "x \ua7cd's", 7), ("4.8", "x \u1c8a's", 7),
+]
+
+
 @pytest.mark.parametrize(
     "version,text,content",
-    APOSTROPHE_ROWS + SPACE_RUN_ROWS + CONTRACTION_ROWS + SYMBOL_ROWS + PIECE_ROWS,
+    APOSTROPHE_ROWS + SPACE_RUN_ROWS + CONTRACTION_ROWS + SYMBOL_ROWS + PIECE_ROWS
+    + MIXED_DIGIT_ROWS + TONE_MARK_ROWS + SHARP_S_ROWS + NAMESPACE_ROWS + TURN_MARKER_ROWS
+    + UNICODE_16_ROWS,
     ids=lambda v: repr(v) if isinstance(v, str) else str(v))
 def test_recorded_costs(version, text, content):
     overhead = _model(_family(version)).message_overhead

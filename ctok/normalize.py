@@ -15,23 +15,44 @@ import unicodedata
 import regex
 
 from .constants import (
-    BOW_G, CAPS_G, CONTRACTION_SUFFIXES, DIGIT, EOW_G,
+    ASSISTANT_G, BOW_G, CAPS_G, CONTRACTION_SUFFIXES, DIGIT, EOW_G,
     ESCAPED_MARKER_LITERALS,
-    FUNNY_SPACE, HARD, IDEOGRAPHIC_SYMBOLS, LITERAL_MARKER_ESCAPE_TABLE,
-    PUNCT, PUNCT_SYMS, QUOTE_FOLD, SEAM_RE, SHIFT_G, SPACE,
+    FUNNY_SPACE, HARD, HUMAN_G, IDEOGRAPHIC_SYMBOLS, LITERAL_MARKER_ESCAPE_TABLE,
+    PUNCT, PUNCT_SYMS, QUOTE_FOLD, SEAM_RE, SHIFT_G, SPACE, SPECIAL, SPECIAL_GLYPHS,
     STRIP_CONTROL, STRIP_PRIVATE,
     SURROGATE, SYMBOL_LETTERS, VARIATION_SELECTORS, WORDY,
 )
 
 _STRAY_MARK = "stray_mark"
 
-# Python 3.13 ships Unicode 15.1 data; the source models know these Unicode 16.0 case pairs.
-_NEW_CASE_PAIRS = {"\u1c89": "\u1c8a", "\ua7cb": "\u0264"}
+# Two hard-coded strings, matched on ASCII only and case-insensitively:
+#
+# * Claude's tool-call namespace costs nothing in every family: `antml:` right after `<`, `</` or
+#   `<//` is dropped, as is the second slash of `<//`, when anything but `<` or `>` follows: a tag
+#   in the namespace costs what the bare tag does, and `<antml:/` reads as `</`.
+# * The legacy turn markers (v3 and v4.7 only): `Human` or `Assistant` plus one colon, right after
+#   two or more newlines, is two tokens however it is cased. The newline run tiles as usual. The
+#   word becomes a glyph that stands as its own punct-like run with its colon.
+_NS_RE = regex.compile(r"(?<=<)(/?)/?antml:(?=[^<>])", regex.ASCII | regex.IGNORECASE)
+_TURN_RE = regex.compile(r"(?<=\n\n)(human|assistant)(?=:)", regex.ASCII | regex.IGNORECASE)
+
+
+def _special_tokens(norm: str, turn_markers: bool) -> str:
+    norm = _NS_RE.sub(r"\1", norm)
+    if turn_markers:
+        norm = _TURN_RE.sub(lambda m: HUMAN_G if m[1].lower() == "human" else ASSISTANT_G, norm)
+    return norm
+
+
+# Python 3.13 ships Unicode 15.1 data; the source models know these Unicode 16.0 case pairs. Their
+# Unicode 17 letters (U+A7CE and on) still measure unassigned.
+_NEW_CASE_PAIRS = {"\u1c89": "\u1c8a", "\ua7cb": "\u0264", "\ua7cc": "\ua7cd", "\ua7da": "\ua7db",
+                   "\ua7dc": "\u019b"}
 _NEW_CASED = frozenset(_NEW_CASE_PAIRS) | frozenset(_NEW_CASE_PAIRS.values())
 
 
 # Uncased for the models, though Unicode calls `ϴ` a capital: bare it costs 4, where ⟨shift⟩ + `θ`
-# costs 3. Not ẞ's blanket block below — `Θϴ` still takes its ⟨shift⟩ — so it drops out of the
+# costs 3. Not ẞ's head block below — `ϴ` stays bare even at a span head — so it drops out of the
 # cased set instead.
 _UNCASED = frozenset("\u03f4")
 _ALPHABETIC = regex.compile(r"\p{Alphabetic}")
@@ -91,6 +112,8 @@ def is_hard_cp(o: int) -> bool:
 @cache
 def classify(c: str) -> str:
     """The stream class of one codepoint, derived from Unicode data and measured tables."""
+    if c in SPECIAL_GLYPHS:
+        return SPECIAL
     if c in _NEW_CASED:
         return WORDY
     o = ord(c)
@@ -132,21 +155,19 @@ def mark_case(span: str, allcaps_min: int | None = 4, *, head_mark: bool = False
       True for ``ヲBUTTヲ`` or ``းUNDPA``, but the oracle spells them literally). ⟨shift⟩ is not
       blocked: a title-case head with a caseless tail keeps its marker.
     * A character with no lowered form blocks either marker (``'ℳ'.lower()`` is ``'ℳ'``, so a
-      marker in front of an unchanged body over-counts). İ is the one exception: transparent to
-      the title-case test and literal in the lowered body, blocking only at the span head; ẞ
-      blocks everywhere.
+      marker in front of an unchanged body over-counts). İ and ẞ are the exceptions: transparent
+      to the title-case test and literal in the lowered body, blocking only at the span head
+      (`Aẞ` takes ⟨shift⟩; 300 measured spans in each family).
     * ``head_mark`` means an unattached mark opened the word, so its head is
       that mark and neither marker can assert its lowered first letter.
     """
     if head_mark:
         return span
-    if "ẞ" in span:
-        return span
-    if "İ" in span:
+    if "İ" in span or "ẞ" in span:
         tail = span[1:]
-        if _is_upper(span[:1]) and span[:1] != "İ" and \
-                not any(_is_upper(c) for c in tail if c != "İ"):
-            return SHIFT_G + _lower(span[0]) + "".join(c if c == "İ" else _lower(c)
+        if _is_upper(span[:1]) and span[:1] not in "İẞ" and \
+                not any(_is_upper(c) for c in tail if c not in "İẞ"):
+            return SHIFT_G + _lower(span[0]) + "".join(c if c in "İẞ" else _lower(c)
                                                        for c in tail)
         return span
     unlowerable = any((c in _NEW_CASED or unicodedata.category(c)[0] in ("L", "M"))
@@ -172,13 +193,24 @@ def _is_selector(ch: str) -> bool:
 
 
 def _hard_bow(body: str) -> bool:
-    """Whether the first character of a hard run takes a left border marker."""
-    return bool(body) and (_is_selector(body[0]) or _marks_like_punct(body[0]))
+    """Whether the first character of a hard run takes a left border marker.
+
+    A mixed run that opens on a border digit (`⅔︀`, `①໒`) takes it as a uniform digit run would:
+    the first character decides, as in :func:`_digit_bow`. Measured behind a space run and at the
+    message head, in all three families.
+    """
+    return bool(body) and (_is_selector(body[0]) or _marks_like_punct(body[0])
+                           or (not _digit_run(body) and _digit_border(body[0])))
 
 
 def _hard_eow(body: str) -> bool:
-    """Whether the last character of a hard run takes a right border marker."""
-    return bool(body) and (_is_selector(body[-1]) or _marks_like_punct(body[-1]))
+    """Whether the last character of a hard run takes a right border marker.
+
+    The mirror of :func:`_hard_bow`: a mixed run that closes on a border digit (`௰໒`, `⅔６`) takes
+    it as :func:`_digit_eow` would. It shows before a run that writes no ⟨bow⟩, such as `௰໒ 𣊋`.
+    """
+    return bool(body) and (_is_selector(body[-1]) or _marks_like_punct(body[-1])
+                           or (not _digit_run(body) and _digit_border(body[-1])))
 
 
 def _opens_word(runs: list[tuple[str, str]], i: int) -> bool:
@@ -203,7 +235,7 @@ def _takes_right_border(cls: str, body: str) -> bool:
     (the ``_STRAY_MARK`` branch of :func:`stream_norm`), and a word lets the contraction seam
     through.
     """
-    return (cls == PUNCT
+    return (cls in (PUNCT, SPECIAL)
             or _hard_eow(body)
             or (cls in (DIGIT, HARD) and _digit_run(body) and _digit_eow(body)))
 
@@ -327,7 +359,9 @@ def _runs(norm: str) -> list[tuple[str, str]]:
         # rider measured one token under if made to ride.
         if cur_cls == _STRAY_MARK and c == WORDY and _stray_mark(ch):
             cur += ch                  # consecutive unattached marks are one regex-style run
-        elif c == cur_cls:
+        elif cur_cls == SPECIAL and cur in (HUMAN_G, ASSISTANT_G) and ch == ":":
+            cur += ch                  # a turn marker owns exactly one colon (`Human::` pays one more)
+        elif c == cur_cls and c != SPECIAL:
             cur += ch
         elif c == WORDY and _stray_mark(ch) and cur_cls != WORDY:
             out.append((cur_cls, cur))
@@ -386,21 +420,24 @@ def _marks_like_punct(ch: str) -> bool:
     is judged as a whole.
 
     The category test misses the block's own symbols, which read the same way; `IDEOGRAPHIC_SYMBOLS`
-    carries them.
+    carries them. The block's six tone marks (U+302A to U+302F) are separator marks that read the
+    same way too: `〬 䦜` and `a  〬` are one over with a marker on either side.
 
     Astral characters are excluded too: an emoji takes no border marker, so it must not be the
     punct kind either. A format character in front of one would otherwise be glued into a single
     markerless sub-run and lose the ⟨bow⟩ it is entitled to.
     """
     ch = ESCAPED_MARKER_LITERALS.get(ch, ch)
-    if ord(ch) >= 0x10000:
+    if ord(ch) >= 0x10000 or ch in _NEW_CASED:     # letters this Python still reads as Cn
+        return False
+    cat = unicodedata.category(ch)
+    ideographic_punct = 0x3001 <= ord(ch) <= 0x303F and (cat[0] in ("P", "M")
+                                                         or ch in IDEOGRAPHIC_SYMBOLS)
+    if ideographic_punct:
         return False
     if is_separator(ch):
         return True
-    cat = unicodedata.category(ch)
-    ideographic_punct = 0x3001 <= ord(ch) <= 0x303F and (cat.startswith("P")
-                                                         or ch in IDEOGRAPHIC_SYMBOLS)
-    return (cat[0] in ("P", "S") or cat in ("Cf", "Cn")) and not ideographic_punct
+    return cat[0] in ("P", "S") or cat in ("Cf", "Cn")
 
 
 def stream(text: str, model) -> str:
@@ -435,6 +472,8 @@ def stream_norm(norm: str, model, *, raw_head_space: bool = True) -> str:
     # Protect literal occurrences of the codepoints used as internal markers. PUA input was removed
     # by NFC, so the private-use escape values cannot collide with text.
     norm = norm.translate(LITERAL_MARKER_ESCAPE_TABLE)
+    # Before the trailing newlines go: one can be what follows a namespace.
+    norm = _special_tokens(norm, model.turn_markers)
 
     # `engine.tile` reads the content-final newline run before dropping it here and applies the
     # frame's newline ladder separately.
@@ -488,7 +527,7 @@ def stream_norm(norm: str, model, *, raw_head_space: bool = True) -> str:
     first = runs[0]
     head_quote = _opens_word(runs, 0)
     has_own_bow = not head_quote and (
-                   first[0] in (WORDY, PUNCT, _STRAY_MARK)
+                   first[0] in (WORDY, PUNCT, SPECIAL, _STRAY_MARK)
                    or _hard_bow(first[1])
                    or (first[0] in (DIGIT, HARD) and _digit_bow(first[1]))
                    or (first[0] == SPACE and first[1][:1] == " "))
@@ -518,15 +557,16 @@ def stream_norm(norm: str, model, *, raw_head_space: bool = True) -> str:
             # words. The run head does not byte-price because the mark reaches its own unit piece.
             letter_follows = i + 1 < n_runs and runs[i + 1][0] == WORDY
             out.append(BOW_G + body + ("" if letter_follows else EOW_G))
-        elif cls == PUNCT or _hard_bow(body) or _hard_eow(body):
+        elif cls in (PUNCT, SPECIAL) or _hard_bow(body) or _hard_eow(body):
             # A punct span is marked only on the side that borders whitespace: `a! b` gets `!⟨eow⟩`,
             # `a!b` gets a bare `!`. The marker is written unconditionally; the vocabulary decides
-            # whether a piece swallows it.
+            # whether a piece swallows it. A special token is marked the same way.
+            punct_like = cls in (PUNCT, SPECIAL)
             takes_bow = (borders_space(i, -1) and not _opens_word(runs, i)
-                         and (cls == PUNCT or _hard_bow(body)))
+                         and (punct_like or _hard_bow(body)))
             out.append((BOW_G if takes_bow else "") + body
                        + (EOW_G if borders_space(i, +1)
-                          and (cls == PUNCT or _hard_eow(body)) else ""))
+                          and (punct_like or _hard_eow(body)) else ""))
         elif _digit_run(body) and cls in (DIGIT, HARD):
             # A digit run takes the same border markers punctuation does, on both sides, decided
             # by the border character (`_digit_bow`, `_digit_eow`). Deliberately no lookback
